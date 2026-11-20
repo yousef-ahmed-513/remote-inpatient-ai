@@ -1,0 +1,269 @@
+// Remote Inpatient AI — data model (SQLite for the hackathon MVP).
+// All rows are SYNTHETIC demo data. String "enums" are documented in src/lib/types.ts.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id        String   @id @default(cuid())
+  name      String
+  email     String   @unique
+  role      String // ADMIN | DOCTOR | NURSE | PATIENT | CAREGIVER
+  title     String   @default("")
+  // PATIENT: their own record. CAREGIVER: the patient they are authorised for.
+  patientId String?
+  createdAt DateTime @default(now())
+}
+
+model Ward {
+  id       String    @id @default(cuid())
+  name     String
+  capacity Int       @default(8)
+  patients Patient[]
+}
+
+model Patient {
+  id                 String    @id @default(cuid())
+  mrn                String    @unique // synthetic ID, e.g. SYN-0001
+  name               String
+  age                Int
+  sex                String
+  condition          String
+  pathway            String
+  room               String
+  wardId             String
+  ward               Ward      @relation(fields: [wardId], references: [id])
+  doctorId           String?
+  nurseId            String?
+  admittedAt         DateTime
+  carePlan           String    @default("[]") // JSON string[]
+  lastContactAt      DateTime?
+  nextCheckInDueAt   DateTime?
+  awaitingAssessment Boolean   @default(false)
+  // simulator
+  scenario           String // STABLE | RESP | CARDIAC | DISCONNECT | MISSED_CHECKIN | AWAITING
+  simPhase           String    @default("baseline")
+  simStep            Int       @default(0)
+  ecgIrregular       Boolean   @default(false)
+  // denormalised latest value per vital: { HR: { v, v2?, t, src } , ... }
+  latestJson         String    @default("{}")
+  lastReadingAt      DateTime?
+
+  devices     Device[]
+  readings    Reading[]
+  alerts      Alert[]
+  symptoms    Symptom[]
+  notes       Note[]
+  tasks       Task[]
+  messages    Message[]
+  medications Medication[]
+  summaries   AiSummary[]
+  ecgStrips   EcgStrip[]
+  consults    Consult[]
+  thresholds  Threshold[]
+}
+
+model Device {
+  id         String    @id @default(cuid())
+  patientId  String
+  patient    Patient   @relation(fields: [patientId], references: [id], onDelete: Cascade)
+  name       String
+  deviceType String // WEARABLE_PATCH | PULSE_OXIMETER | BP_MONITOR | THERMOMETER | GLUCOMETER | SCALE
+  adapter    String    @default("SIMULATED") // SIMULATED | BLUETOOTH | EXTERNAL_API | MANUAL
+  status     String    @default("CONNECTED") // CONNECTED | DISCONNECTED
+  battery    Int       @default(90)
+  streaming  Boolean   @default(true) // false = spot-check device (manual check-ins)
+  lastSeenAt DateTime?
+}
+
+model Reading {
+  id        String   @id @default(cuid())
+  patientId String
+  patient   Patient  @relation(fields: [patientId], references: [id], onDelete: Cascade)
+  deviceId  String?
+  type      String // HR | SPO2 | BP | TEMP | RR | GLUCOSE | WEIGHT
+  value     Float
+  value2    Float? // diastolic for BP
+  unit      String
+  source    String // SIMULATED_DEVICE | PATIENT_REPORTED | CAREGIVER_REPORTED | CLINICIAN_ENTERED
+  quality   String   @default("GOOD")
+  takenAt   DateTime
+
+  @@index([patientId, type, takenAt])
+}
+
+model EcgStrip {
+  id          String   @id @default(cuid())
+  patientId   String
+  patient     Patient  @relation(fields: [patientId], references: [id], onDelete: Cascade)
+  deviceId    String?
+  takenAt     DateTime
+  durationSec Int      @default(10)
+  heartRate   Int
+  irregular   Boolean  @default(false)
+  seed        Int // waveform is regenerated deterministically from seed + params
+  label       String
+}
+
+// Monitoring rule limits. patientId = null → programme default (admin-configured demo defaults).
+model Threshold {
+  id        String   @id @default(cuid())
+  patientId String?
+  patient   Patient? @relation(fields: [patientId], references: [id], onDelete: Cascade)
+  vital     String // HR | SPO2 | BP_SYS | BP_DIA | TEMP | RR | GLUCOSE
+  critLow   Float?
+  warnLow   Float?
+  warnHigh  Float?
+  critHigh  Float?
+  updatedBy String?
+  updatedAt DateTime @updatedAt
+
+  @@unique([patientId, vital])
+}
+
+model Alert {
+  id               String    @id @default(cuid())
+  patientId        String
+  patient          Patient   @relation(fields: [patientId], references: [id], onDelete: Cascade)
+  kind             String // THRESHOLD | TREND | CONNECTIVITY | CHECKIN_OVERDUE | RHYTHM_FLAG | SYMPTOM
+  vital            String?
+  severity         String // WARNING | CRITICAL
+  title            String
+  message          String
+  status           String    @default("OPEN") // OPEN | ACKNOWLEDGED | ESCALATED | RESOLVED
+  createdAt        DateTime  @default(now())
+  acknowledgedAt   DateTime?
+  acknowledgedById String?
+  escalatedAt      DateTime?
+  escalatedById    String?
+  resolvedAt       DateTime?
+  resolvedById     String? // "system" when cleared automatically (connectivity / check-in only)
+  resolutionNote   String?
+
+  @@index([status, createdAt])
+  @@index([patientId, status])
+}
+
+model Symptom {
+  id           String   @id @default(cuid())
+  patientId    String
+  patient      Patient  @relation(fields: [patientId], references: [id], onDelete: Cascade)
+  text         String
+  severity     String   @default("MODERATE") // MILD | MODERATE | SEVERE
+  reportedById String? // null = simulator
+  reportedBy   String // display label
+  reviewedAt   DateTime?
+  reviewedById String?
+  createdAt    DateTime @default(now())
+}
+
+model Note {
+  id         String   @id @default(cuid())
+  patientId  String
+  patient    Patient  @relation(fields: [patientId], references: [id], onDelete: Cascade)
+  authorId   String
+  authorName String
+  authorRole String
+  kind       String   @default("NOTE") // NOTE | CHECKIN | OBSERVATION | ASSESSMENT
+  body       String
+  createdAt  DateTime @default(now())
+}
+
+model Task {
+  id            String    @id @default(cuid())
+  patientId     String
+  patient       Patient   @relation(fields: [patientId], references: [id], onDelete: Cascade)
+  title         String
+  assigneeRole  String // NURSE | DOCTOR | CAREGIVER | PATIENT
+  status        String    @default("OPEN") // OPEN | DONE
+  dueAt         DateTime?
+  createdById   String?
+  createdByName String    @default("System")
+  completedAt   DateTime?
+  completedBy   String?
+  createdAt     DateTime  @default(now())
+}
+
+model Message {
+  id         String   @id @default(cuid())
+  patientId  String
+  patient    Patient  @relation(fields: [patientId], references: [id], onDelete: Cascade)
+  senderId   String
+  senderName String
+  senderRole String
+  body       String
+  createdAt  DateTime @default(now())
+}
+
+model Medication {
+  id        String          @id @default(cuid())
+  patientId String
+  patient   Patient         @relation(fields: [patientId], references: [id], onDelete: Cascade)
+  name      String
+  dose      String
+  schedule  String
+  logs      MedicationLog[]
+}
+
+model MedicationLog {
+  id           String     @id @default(cuid())
+  medicationId String
+  medication   Medication @relation(fields: [medicationId], references: [id], onDelete: Cascade)
+  takenAt      DateTime   @default(now())
+  recordedBy   String
+}
+
+model Consult {
+  id            String    @id @default(cuid())
+  patientId     String
+  patient       Patient   @relation(fields: [patientId], references: [id], onDelete: Cascade)
+  requestedById String
+  requestedBy   String
+  reason        String    @default("")
+  status        String    @default("REQUESTED") // REQUESTED | IN_PROGRESS | COMPLETED
+  createdAt     DateTime  @default(now())
+  startedAt     DateTime?
+  endedAt       DateTime?
+}
+
+model AiSummary {
+  id        String   @id @default(cuid())
+  patientId String?
+  patient   Patient? @relation(fields: [patientId], references: [id], onDelete: Cascade)
+  kind      String // PATIENT | HANDOVER
+  engine    String // deterministic | bedrock:<model> | openai:<model>
+  content   String
+  createdBy String
+  createdAt DateTime @default(now())
+}
+
+// Clinician actions + access log (also drives the patient activity timeline).
+model AuditLog {
+  id        String   @id @default(cuid())
+  userId    String?
+  userName  String
+  userRole  String
+  action    String
+  patientId String?
+  detail    String   @default("")
+  createdAt DateTime @default(now())
+
+  @@index([patientId, createdAt])
+  @@index([createdAt])
+}
+
+model SimState {
+  id         Int       @id @default(1)
+  running    Boolean   @default(false)
+  speed      Int       @default(1)
+  tick       Int       @default(0)
+  lastTickAt DateTime?
+  pausedAt   DateTime?
+  seededAt   DateTime  @default(now())
+}

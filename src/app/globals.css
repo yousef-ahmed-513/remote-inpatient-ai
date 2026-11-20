@@ -1,0 +1,148 @@
+@import "tailwindcss";
+
+@custom-variant dark (&:where(.dark, .dark *));
+
+:root {
+  --bg: #f5f8fc;
+  --surface: #ffffff;
+  --surface-2: #eef3f9;
+  --border: #dde5ef;
+  --text: #0f2440;
+  --muted: #5b6b82;
+  --primary: #1456a0;
+  --primary-soft: #e3eefb;
+  --teal: #14b8a6;
+  --teal-soft: #dcf7f3;
+  --ok: #15803d;
+  --ok-soft: #dcfce7;
+  --warn: #b45309;
+  --warn-soft: #fef3c7;
+  --crit: #c81e1e;
+  --crit-soft: #fde8e8;
+  --info: #4338ca;
+  --info-soft: #e7e9ff;
+  --neutral-soft: #e8edf3;
+  --ecg-bg: #06131f;
+  --shadow: 0 1px 2px rgb(15 36 64 / 0.05), 0 4px 16px rgb(15 36 64 / 0.05);
+}
+.dark {
+  --bg: #08121f;
+  --surface: #0f1d2e;
+  --surface-2: #15273c;
+  --border: #213650;
+  --text: #e6eef8;
+  --muted: #8ea2bb;
+  --primary: #5aa2ee;
+  --primary-soft: #14304f;
+  --teal: #2dd4bf;
+  --teal-soft: #0f3a3a;
+  --ok: #4ade80;
+  --ok-soft: #0f3323;
+  --warn: #fbbf24;
+  --warn-soft: #3d2c08;
+  --crit: #f87171;
+  --crit-soft: #431616;
+  --info: #a5b4fc;
+  --info-soft: #23265a;
+  --neutral-soft: #1b2c42;
+  --ecg-bg: #030b13;
+  --shadow: 0 1px 2px rgb(0 0 0 / 0.3), 0 6px 20px rgb(0 0 0 / 0.25);
+}
+
+@theme inline {
+  --color-bg: var(--bg);
+  --color-surface: var(--surface);
+  --color-surface-2: var(--surface-2);
+  --color-line: var(--border);
+  --color-ink: var(--text);
+  --color-muted: var(--muted);
+  --color-primary: var(--primary);
+  --color-primary-soft: var(--primary-soft);
+  --color-teal: var(--teal);
+  --color-teal-soft: var(--teal-soft);
+  --color-ok: var(--ok);
+  --color-ok-soft: var(--ok-soft);
+  --color-warn: var(--warn);
+  --color-warn-soft: var(--warn-soft);
+  --color-crit: var(--crit);
+  --color-crit-soft: var(--crit-soft);
+  --color-info: var(--info);
+  --color-info-soft: var(--info-soft);
+  --color-neutral-soft: var(--neutral-soft);
+  /* System font stack on purpose: the demo must run with no network access. */
+  --font-sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
+  --shadow-card: var(--shadow);
+}
+
+html {
+  color-scheme: light;
+}
+html.dark {
+  color-scheme: dark;
+}
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+}
+.tnum {
+  font-variant-numeric: tabular-nums;
+}
+:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: 2px;
+  border-radius: 6px;
+}
+
+@keyframes pulse-ring {
+  0% {
+    box-shadow: 0 0 0 0 color-mix(in srgb, var(--crit) 45%, transparent);
+  }
+  100% {
+    box-shadow: 0 0 0 10px transparent;
+  }
+}
+.crit-pulse {
+  animation: pulse-ring 1.6s ease-out infinite;
+}
+@keyframes fade-up {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+.fade-up {
+  animation: fade-up 0.28s ease-out both;
+}
+@keyframes live-dot {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.35;
+  }
+}
+.live-dot {
+  animation: live-dot 1.4s ease-in-out infinite;
+}
+@media (prefers-reduced-motion: reduce) {
+  .crit-pulse,
+  .fade-up,
+  .live-dot {
+    animation: none;
+  }
+}
+
+.recharts-cartesian-axis-tick-value {
+  fill: var(--muted);
+  font-size: 11px;
+}
+.recharts-cartesian-grid line {
+  stroke: var(--border);
+}
