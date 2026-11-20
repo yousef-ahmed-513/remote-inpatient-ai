@@ -7,7 +7,8 @@ import type { PatientScope } from "./permissions";
 import { advanceSimulation } from "./simulator";
 import { ensureSeeded } from "./seed";
 import { computeStatus } from "./status";
-import { DEFAULT_LIMITS, type LatestMap, type ThresholdVital } from "./types";
+import { currentTransfer, EMERGENCY_NUMBER, transferDto } from "./transfers";
+import { ACTIVITY_ORDER, DEFAULT_LIMITS, TRANSFER_OPEN, type ActivitySummary, type LatestMap, type ThresholdVital } from "./types";
 
 export const simDto = (s: SimState) => ({
   running: s.running,
@@ -60,12 +61,13 @@ export async function wardView(user: SessionUser) {
   await ensureSeeded();
   const sim = await advanceSimulation();
   const now = new Date();
-  const [patients, active, symptoms, users, wards] = await Promise.all([
+  const [patients, active, symptoms, users, wards, transfers] = await Promise.all([
     prisma.patient.findMany({ include: { devices: true, ward: true }, orderBy: { room: "asc" } }),
     prisma.alert.findMany({ where: { status: { not: "RESOLVED" } }, orderBy: { createdAt: "desc" } }),
     prisma.symptom.groupBy({ by: ["patientId"], where: { reviewedAt: null }, _count: true }),
     prisma.user.findMany(),
     prisma.ward.findMany({ orderBy: { name: "asc" } }),
+    prisma.transfer.findMany({ where: { OR: [{ status: { in: TRANSFER_OPEN } }, { closedAt: { gte: new Date(Date.now() - 6 * 3600_000) } }] }, orderBy: { createdAt: "desc" } }),
   ]);
   const who = userMap(users);
   const symCount = new Map(symptoms.map((s) => [s.patientId, s._count]));
@@ -98,9 +100,16 @@ export async function wardView(user: SessionUser) {
         checkInOverdue: !!p.nextCheckInDueAt && p.nextCheckInDueAt < now,
         latest: JSON.parse(p.latestJson || "{}") as LatestMap,
         connectivity: connectivity(p.devices),
-        deviceCount: p.devices.length,
+        deviceCount: p.devices.filter((d) => d.status !== "REVOKED").length,
+        wearableLinks: p.devices.filter((d) => d.adapter === "WEARABLE_SYNC" && d.status === "CONNECTED").map((d) => ({ name: d.name, lastSyncAt: d.lastSeenAt })),
         state: st.state,
         stateReason: st.reason,
+        transfer: (() => {
+          const t = transfers.find((x) => x.patientId === p.id);
+          if (!t) return null;
+          const d = transferDto(t, "clinical", now)!;
+          return { status: d.status, statusLabel: d.statusLabel, open: d.open, priority: d.priority, destination: d.destination, directAdmission: d.directAdmission, unitStatus: d.unitStatus, etaAt: d.etaAt, etaKind: d.etaKind, incidentRef: t.incidentRef };
+        })(),
         openAlerts: mine.length,
         criticalAlerts: mine.filter((a) => a.severity === "CRITICAL").length,
         topAlert: mine.sort((a, b) => (a.severity === b.severity ? 0 : a.severity === "CRITICAL" ? -1 : 1))[0]?.title ?? null,
@@ -140,6 +149,26 @@ function downsample<T>(xs: T[], max: number): T[] {
   const out: T[] = [];
   for (let i = 0; i < max; i++) out.push(xs[Math.floor(i * k)]);
   out[out.length - 1] = xs[xs.length - 1];
+  return out;
+}
+
+/** Wearable context metrics: steps summed over the last 24 h, latest value for the others. */
+async function activitySummary(patientId: string, now: Date): Promise<ActivitySummary> {
+  const rows = await prisma.reading.findMany({
+    where: { patientId, type: { in: ACTIVITY_ORDER }, takenAt: { gte: new Date(now.getTime() - 7 * 24 * 3600_000) } },
+    orderBy: { takenAt: "desc" },
+    select: { type: true, value: true, source: true, takenAt: true },
+  });
+  const out: ActivitySummary = {};
+  const dayAgo = now.getTime() - 24 * 3600_000;
+  for (const t of ACTIVITY_ORDER) {
+    const mine = rows.filter((r) => r.type === t);
+    if (!mine.length) continue;
+    if (t === "STEPS") {
+      const day = mine.filter((r) => r.takenAt.getTime() >= dayAgo);
+      if (day.length) out.STEPS = { v: day.reduce((a, r) => a + r.value, 0), t: day[0].takenAt.toISOString(), src: day[0].source };
+    } else out[t] = { v: mine[0].value, t: mine[0].takenAt.toISOString(), src: mine[0].source };
+  }
   return out;
 }
 
@@ -204,25 +233,30 @@ export async function patientView(user: SessionUser, patientId: string, scope: P
       checkInOverdue: !!p.nextCheckInDueAt && p.nextCheckInDueAt < now,
       awaitingAssessment: p.awaitingAssessment,
       carePlan: JSON.parse(p.carePlan || "[]") as string[],
+      manualEntry: p.manualEntry,
     },
     state: st.state,
     stateReason: st.reason,
     connectivity: connectivity(p.devices),
     latest,
-    devices: p.devices.map((d) => ({ id: d.id, name: d.name, deviceType: d.deviceType, adapter: d.adapter, status: d.status, streaming: d.streaming, battery: d.battery, lastSeenAt: d.lastSeenAt })),
+    // tokenHash is deliberately never sent to the browser.
+    devices: p.devices.map((d) => ({ id: d.id, name: d.name, deviceType: d.deviceType, adapter: d.adapter, status: d.status, streaming: d.streaming, battery: d.battery, lastSeenAt: d.lastSeenAt, platform: d.platform, tokenHint: d.tokenHint, syncCount: d.syncCount, createdAt: d.createdAt, serial: d.serial, hubId: d.hubId })),
     tasks: tasks.map((t) => ({ id: t.id, title: t.title, assigneeRole: t.assigneeRole, status: t.status, dueAt: t.dueAt, createdByName: t.createdByName, completedAt: t.completedAt, completedBy: t.completedBy })),
     medications: meds.map((m) => ({ id: m.id, name: m.name, dose: m.dose, schedule: m.schedule, lastTakenAt: m.logs[0]?.takenAt ?? null, lastRecordedBy: m.logs[0]?.recordedBy ?? null })),
     messages: messages.map((m) => ({ id: m.id, senderId: m.senderId, senderName: m.senderName, senderRole: m.senderRole, body: m.body, createdAt: m.createdAt })),
     consults: consults.map((c) => ({ id: c.id, status: c.status, reason: c.reason, requestedBy: c.requestedBy, createdAt: c.createdAt, startedAt: c.startedAt, endedAt: c.endedAt })),
     activeAlertCount: active.length,
+    transfer: transferDto(await currentTransfer(patientId, now), scope, now),
+    emergencyNumber: EMERGENCY_NUMBER,
   };
   if (caregiver) return base; // restricted overview: no history, symptoms, notes, alerts detail or AI
 
   const shared = {
     ...base,
     series,
+    activity: await activitySummary(patientId, now),
     limits: eff,
-    symptoms: symptoms.map((s) => ({ id: s.id, text: s.text, severity: s.severity, reportedBy: s.reportedBy, createdAt: s.createdAt, reviewedAt: s.reviewedAt, reviewedBy: who(s.reviewedById)?.name ?? null })),
+    symptoms: symptoms.map((s) => ({ id: s.id, text: s.text, severity: s.severity, redFlags: s.redFlags ? s.redFlags.split(",") : [], reportedBy: s.reportedBy, createdAt: s.createdAt, reviewedAt: s.reviewedAt, reviewedBy: who(s.reviewedById)?.name ?? null })),
   };
   if (!clinical) return shared; // patient: own data, no clinician notes / alert internals / AI summaries
 

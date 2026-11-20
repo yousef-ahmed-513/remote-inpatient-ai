@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { audit, requireUser, route } from "@/lib/auth";
+import { audit, requireDemoMode, requireUser, route } from "@/lib/auth";
 import { withLock } from "@/lib/db";
 import { seedDatabase } from "@/lib/seed";
 import { getSim, simControl } from "@/lib/simulator";
@@ -19,6 +19,7 @@ export const GET = route(async () => {
 // Demo controls for the synthetic data simulator.
 export const POST = route(async (req) => {
   const user = await requireUser("sim:control");
+  requireDemoMode("The data simulator");
   const cmd = schema.parse(await req.json());
   if (cmd.action === "reset") {
     await withLock(() => seedDatabase());

@@ -2,12 +2,16 @@
 // patient-level access on the server before touching data, then writes an audit entry.
 import { z } from "zod";
 import { prisma, withLock } from "@/lib/db";
-import { audit, HttpError, requirePatientAccess, requireUser, route } from "@/lib/auth";
-import { evaluateReadings, loadAlertContext, loadLimits, raiseAlert } from "@/lib/alerts";
+import { audit, HttpError, requirePatientAccess, requireUser, route, requireDemoMode } from "@/lib/auth";
+import { evaluateReadings, loadAlertContext, loadLimits, raiseAlert, checkWeightTrend } from "@/lib/alerts";
 import { generatePatientSummary } from "@/lib/ai";
 import { patientScope } from "@/lib/permissions";
 import { setPatientDevices, UNITS } from "@/lib/simulator";
-import { DEFAULT_LIMITS, SOURCE_LABEL, THRESHOLD_VITALS, type LatestMap, type ThresholdVital, type VitalType } from "@/lib/types";
+import { DEFAULT_LIMITS, RED_FLAG_ORDER, RED_FLAGS, SOURCE_LABEL, THRESHOLD_VITALS, TRANSFER_PATHWAYS, WEARABLE_PLATFORMS, type RedFlag, type LatestMap, type ThresholdVital, type VitalType } from "@/lib/types";
+import { detectRedFlags } from "@/lib/triage";
+import { DEVICE_INGEST_PATH, demoHubBundle, ingestGatewayBatch, newHubToken, parseGatewayPayload } from "@/lib/gateway";
+import { AMBULANCE_SERVICE, EMERGENCY_NUMBER, cancelTransfer, RECEIVING_HOSPITAL, requestTransfer, skipStage, suggestTransfer, tickChecklist, TIME_SCALE, urgentHelp } from "@/lib/transfers";
+import { demoHealthAutoExportPayload, INGEST_PATH, ingestWearableBatch, newWearableToken, parseWearablePayload, type DemoScenario } from "@/lib/wearables";
 
 const RANGE: Record<VitalType, [number, number]> = {
   HR: [20, 250],
@@ -41,6 +45,12 @@ export const POST = route<{ id: string; action: string }>(async (req, { id, acti
   switch (action) {
     case "readings": {
       const { user } = await requirePatientAccess(id, "reading:submit");
+      // Readings normally arrive from devices (home hub / monitoring devices). Patients and caregivers
+      // can type them only when a clinician has switched on the manual fallback (e.g. a faulty device).
+      if (user.role === "PATIENT" || user.role === "CAREGIVER") {
+        const pm = await prisma.patient.findUniqueOrThrow({ where: { id }, select: { manualEntry: true } });
+        if (!pm.manualEntry) throw new HttpError(403, "Readings are sent automatically by the monitoring devices. Manual entry is switched off — the care team can enable it if a device is not working.");
+      }
       const input = z.object({ readings: z.array(readingSchema).min(1).max(8), comment: z.string().max(500).optional() }).parse(body);
       const source = user.role === "PATIENT" ? "PATIENT_REPORTED" : user.role === "CAREGIVER" ? "CAREGIVER_REPORTED" : "CLINICIAN_ENTERED";
       return withLock(async () => {
@@ -63,6 +73,7 @@ export const POST = route<{ id: string; action: string }>(async (req, { id, acti
         const limits = await loadLimits();
         const ctx = await loadAlertContext(prisma, now);
         const raised = await evaluateReadings(prisma, id, input.readings, limits.forPatient(id), ctx.active, ctx.recentlyResolved, now, SOURCE_LABEL[source]);
+        if (input.readings.some((r) => r.type === "WEIGHT") && (await checkWeightTrend(prisma, id, ctx.active, ctx.recentlyResolved, now))) raised.push(ctx.active[ctx.active.length - 1]);
         await audit(user, "READINGS_SUBMITTED", {
           patientId: id,
           detail: `${SOURCE_LABEL[source]}: ${input.readings.map((r) => `${r.type} ${r.value}${r.value2 != null ? `/${r.value2}` : ""}`).join(", ")}${input.comment ? ` — "${input.comment}"` : ""}`,
@@ -73,21 +84,47 @@ export const POST = route<{ id: string; action: string }>(async (req, { id, acti
 
     case "symptoms": {
       const { user } = await requirePatientAccess(id, "symptom:submit");
-      const input = z.object({ text: z.string().trim().min(3).max(600), severity: z.enum(["MILD", "MODERATE", "SEVERE"]) }).parse(body);
-      const s = await prisma.symptom.create({ data: { patientId: id, text: input.text, severity: input.severity, reportedById: user.id, reportedBy: `${user.name} (${user.role.toLowerCase()})` } });
-      if (input.severity !== "MILD") {
-        const ctx = await loadAlertContext(prisma, now);
+      const input = z
+        .object({ text: z.string().trim().min(3).max(600), severity: z.enum(["MILD", "MODERATE", "SEVERE"]), redFlags: z.array(z.enum(RED_FLAG_ORDER as [RedFlag, ...RedFlag[]])).max(8).default([]) })
+        .parse(body);
+      // Red flags: ticked boxes + keyword detection (EN/AR). Deterministic — never waits for AI.
+      const flags = RED_FLAG_ORDER.filter((f) => input.redFlags.includes(f) || detectRedFlags(input.text).includes(f));
+      const severity = flags.length ? "SEVERE" : input.severity;
+      const s = await prisma.symptom.create({ data: { patientId: id, text: input.text, severity, redFlags: flags.join(","), reportedById: user.id, reportedBy: `${user.name} (${user.role.toLowerCase()})` } });
+      const ctx = await loadAlertContext(prisma, now);
+      if (flags.length) {
+        const labels = flags.map((f) => RED_FLAGS[f].label).join("; ");
         await raiseAlert(
           prisma,
           id,
-          { kind: "SYMPTOM", vital: null, severity: "WARNING", title: `${input.severity === "SEVERE" ? "Severe" : "Moderate"} symptom reported by ${user.role.toLowerCase()}`, message: `"${input.text}" — requires clinician review.` },
+          {
+            kind: "RED_FLAG",
+            vital: null,
+            severity: "CRITICAL",
+            title: `Red-flag symptom: ${RED_FLAGS[flags[0]].label}`,
+            message: `${user.name} (${user.role.toLowerCase()}) reported "${input.text}" — red flags: ${labels}. ${user.role === "NURSE" ? "" : `They were shown the emergency number (${EMERGENCY_NUMBER}) immediately. `}Contact the patient now and consider an emergency transfer (suggested pathway: ${TRANSFER_PATHWAYS[RED_FLAGS[flags[0]].pathway].label}).`,
+          },
+          ctx.active,
+          ctx.recentlyResolved,
+          now,
+        );
+      } else if (severity !== "MILD") {
+        await raiseAlert(
+          prisma,
+          id,
+          { kind: "SYMPTOM", vital: null, severity: "WARNING", title: `${severity === "SEVERE" ? "Severe" : "Moderate"} symptom reported by ${user.role.toLowerCase()}`, message: `"${input.text}" — requires clinician review.` },
           ctx.active,
           ctx.recentlyResolved,
           now,
         );
       }
-      await audit(user, "SYMPTOM_REPORTED", { patientId: id, detail: `${input.severity}: ${input.text}` });
-      return { ok: true, id: s.id };
+      await audit(user, flags.length ? "RED_FLAG_REPORTED" : "SYMPTOM_REPORTED", { patientId: id, detail: `${severity}: ${input.text}${flags.length ? ` [red flags: ${flags.join(", ")}]` : ""}` });
+      return {
+        ok: true,
+        id: s.id,
+        redFlags: flags.map((f) => ({ flag: f, label: RED_FLAGS[f].label, advice: RED_FLAGS[f].advice })),
+        emergencyNumber: EMERGENCY_NUMBER,
+      };
     }
 
     case "symptom-review": {
@@ -197,6 +234,135 @@ export const POST = route<{ id: string; action: string }>(async (req, { id, acti
       await setPatientDevices(id, input.status, input.deviceId);
       await audit(user, input.status === "CONNECTED" ? "DEVICE_CONNECTED" : "DEVICE_DISCONNECTED", { patientId: id, detail: `Simulated device adapter ${input.status.toLowerCase()}` });
       return { ok: true };
+    }
+
+    // --- home hub: automatic device uploads (see docs/DEVICE-GATEWAY.md) ---
+    case "hub-register": {
+      const { user } = await requirePatientAccess(id, "kit:manage");
+      const input = z.object({ name: z.string().trim().min(2).max(80).optional(), serial: z.string().trim().min(3).max(40).optional() }).parse(body);
+      const existing = await prisma.device.findFirst({ where: { patientId: id, deviceType: "HOME_HUB", status: "CONNECTED" } });
+      if (existing) throw new HttpError(409, "This patient already has an active home hub — revoke it first to replace it");
+      const t = newHubToken();
+      const hub = await prisma.device.create({ data: { patientId: id, name: input.name ?? "Home hub", deviceType: "HOME_HUB", adapter: "GATEWAY", streaming: false, status: "CONNECTED", battery: 100, serial: input.serial ?? `HUB-${Date.now().toString(36).toUpperCase()}`, tokenHash: t.hash, tokenHint: t.hint } });
+      // Pair every medical device of this patient (not wearables) with the new hub.
+      const paired = await prisma.device.updateMany({ where: { patientId: id, deviceType: { notIn: ["HOME_HUB", "SMARTWATCH", "PHONE"] }, status: { not: "REVOKED" } }, data: { hubId: hub.id } });
+      await audit(user, "HUB_PROVISIONED", { patientId: id, detail: `${hub.name} (${hub.serial}) — ${paired.count} device(s) paired; token …${t.hint} issued` });
+      return { ok: true, hubId: hub.id, token: t.token, ingestPath: DEVICE_INGEST_PATH, paired: paired.count };
+    }
+
+    case "hub-revoke": {
+      const { user } = await requirePatientAccess(id, "kit:manage");
+      const hub = await prisma.device.findFirst({ where: { patientId: id, deviceType: "HOME_HUB", status: "CONNECTED" } });
+      if (!hub) throw new HttpError(404, "No active home hub for this patient");
+      await prisma.device.update({ where: { id: hub.id }, data: { status: "REVOKED", tokenHash: null } });
+      await prisma.device.updateMany({ where: { hubId: hub.id }, data: { hubId: null } });
+      await audit(user, "HUB_REVOKED", { patientId: id, detail: `${hub.name} (${hub.serial}) revoked — devices unpaired` });
+      return { ok: true };
+    }
+
+    case "hub-demo": {
+      const { user } = await requirePatientAccess(id, "kit:manage");
+      requireDemoMode("Synthetic hub uploads");
+      const { scenario } = z.object({ scenario: z.enum(["NORMAL", "HIGH"]).default("NORMAL") }).parse(body);
+      const hub = await prisma.device.findFirst({ where: { patientId: id, deviceType: "HOME_HUB", status: "CONNECTED" } });
+      if (!hub) throw new HttpError(404, "No active home hub for this patient — register one first");
+      const out = await ingestGatewayBatch(hub, parseGatewayPayload(await demoHubBundle(id, hub.id, scenario, now)), { demo: true, now });
+      await audit(user, "HUB_DEMO_SENT", { patientId: id, detail: `Synthetic ${scenario.toLowerCase()} FHIR upload sent through the real hub ingest path` });
+      return out;
+    }
+
+    case "manual-entry": {
+      const { user } = await requirePatientAccess(id, "kit:manage");
+      const input = z.object({ enabled: z.boolean(), reason: z.string().trim().min(3, "Give a reason (e.g. which device is faulty)").max(300) }).parse(body);
+      await prisma.patient.update({ where: { id }, data: { manualEntry: input.enabled } });
+      await audit(user, input.enabled ? "MANUAL_ENTRY_ENABLED" : "MANUAL_ENTRY_DISABLED", { patientId: id, detail: input.reason });
+      return { ok: true, manualEntry: input.enabled };
+    }
+
+    // --- emergency transfer: ambulance + direct admission (see docs/EMERGENCY-TRANSFER.md) ---
+    case "transfer-suggest": {
+      await requirePatientAccess(id, "transfer:request");
+      const p = await prisma.patient.findUniqueOrThrow({ where: { id }, select: { address: true, accessNotes: true } });
+      return { ...(await suggestTransfer(id)), pickupAddress: p.address, accessNotes: p.accessNotes, hospital: RECEIVING_HOSPITAL, ambulanceService: AMBULANCE_SERVICE, timeScale: TIME_SCALE };
+    }
+
+    case "transfer-request": {
+      const { user } = await requirePatientAccess(id, "transfer:request");
+      const input = z
+        .object({
+          priority: z.enum(["EMERGENCY", "URGENT"]),
+          pathway: z.enum(["CARDIAC", "RESPIRATORY", "SEPSIS", "SURGICAL", "METABOLIC", "GENERAL_MEDICAL", "EMERGENCY_DEPT"]),
+          reason: z.string().trim().min(5, "Give the crew a short reason").max(400),
+          accessNotes: z.string().trim().max(300).optional(),
+        })
+        .parse(body);
+      const t = await requestTransfer(user, id, input, now);
+      return { ok: true, transferId: t.id, incidentRef: t.incidentRef };
+    }
+
+    case "transfer-advance": {
+      const { user } = await requirePatientAccess(id, "transfer:manage");
+      requireDemoMode("The transfer demo clock");
+      await skipStage(user, id, now);
+      return { ok: true };
+    }
+
+    case "transfer-cancel": {
+      const { user } = await requirePatientAccess(id, "transfer:manage");
+      const { reason } = z.object({ reason: z.string().trim().min(3, "Give a reason for standing the ambulance down").max(300) }).parse(body);
+      await cancelTransfer(user, id, reason, now);
+      return { ok: true };
+    }
+
+    case "transfer-prep": {
+      const { user } = await requirePatientAccess(id, "transfer:manage");
+      const { itemId, done } = z.object({ itemId: z.string(), done: z.boolean() }).parse(body);
+      await tickChecklist(user, id, itemId, done, now);
+      return { ok: true };
+    }
+
+    case "urgent-help": {
+      const { user } = await requirePatientAccess(id, "urgent:help");
+      return urgentHelp(user, id, now);
+    }
+
+    // --- smartwatch / phone links (see docs/WEARABLES.md) ---
+    case "wearable-link": {
+      const { user } = await requirePatientAccess(id, "device:manage");
+      const input = z.object({ platform: z.enum(["APPLE_HEALTH", "HEALTH_CONNECT", "OTHER"]), label: z.string().trim().min(2).max(80).optional() }).parse(body);
+      const activeLinks = await prisma.device.count({ where: { patientId: id, adapter: "WEARABLE_SYNC", status: "CONNECTED" } });
+      if (activeLinks >= 5) throw new HttpError(409, "This patient already has 5 active smartwatch / phone links — revoke one first");
+      const meta = WEARABLE_PLATFORMS[input.platform];
+      const t = newWearableToken();
+      const d = await prisma.device.create({
+        data: { patientId: id, name: input.label ?? meta.defaultName, deviceType: meta.deviceType, adapter: "WEARABLE_SYNC", status: "CONNECTED", streaming: false, platform: input.platform, tokenHash: t.hash, tokenHint: t.hint, lastSeenAt: null },
+      });
+      await audit(user, "WEARABLE_LINKED", { patientId: id, detail: `${d.name} (${meta.label}) — device token …${t.hint} issued` });
+      // The token is returned exactly once; only its hash is stored.
+      return { ok: true, deviceId: d.id, name: d.name, token: t.token, ingestPath: INGEST_PATH };
+    }
+
+    case "wearable-revoke": {
+      const { user } = await requirePatientAccess(id, "device:manage");
+      const { deviceId } = z.object({ deviceId: z.string() }).parse(body);
+      const d = await prisma.device.findFirst({ where: { id: deviceId, patientId: id, adapter: "WEARABLE_SYNC" } });
+      if (!d) throw new HttpError(404, "Smartwatch / phone link not found for this patient");
+      if (d.status === "REVOKED") throw new HttpError(409, "This link is already revoked");
+      await prisma.device.update({ where: { id: d.id }, data: { status: "REVOKED", tokenHash: null } });
+      await audit(user, "WEARABLE_REVOKED", { patientId: id, detail: `${d.name} — token …${d.tokenHint ?? ""} revoked; stored readings are kept` });
+      return { ok: true };
+    }
+
+    case "wearable-demo": {
+      const { user } = await requirePatientAccess(id, "device:manage");
+      requireDemoMode("Synthetic wearable syncs");
+      const input = z.object({ deviceId: z.string(), scenario: z.enum(["NORMAL", "LOW_SPO2", "AFIB"]).default("NORMAL") }).parse(body);
+      const d = await prisma.device.findFirst({ where: { id: input.deviceId, patientId: id, adapter: "WEARABLE_SYNC" } });
+      if (!d) throw new HttpError(404, "Smartwatch / phone link not found for this patient");
+      if (d.status !== "CONNECTED") throw new HttpError(409, "This link is revoked");
+      const out = await ingestWearableBatch(d, parseWearablePayload(demoHealthAutoExportPayload(input.scenario as DemoScenario, now)), { demo: true, now });
+      await audit(user, "WEARABLE_DEMO_SENT", { patientId: id, detail: `Synthetic ${input.scenario.toLowerCase().replace("_", " ")} sync sent through the real ingest path for ${d.name}` });
+      return out;
     }
 
     case "medlog": {

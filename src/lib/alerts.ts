@@ -132,3 +132,41 @@ export async function loadAlertContext(db: Db, now: Date) {
   ]);
   return { active, recentlyResolved };
 }
+
+/**
+ * Heart-failure style trend rule (demo setting, not a clinical protocol): weight up by
+ * WEIGHT_GAIN_ALERT_KG (default 2 kg) or more within 72 h. Mentions breathlessness reported in
+ * the last 24 h, because the two together are what a clinician wants to see first.
+ */
+export const WEIGHT_GAIN_KG = (() => {
+  const n = Number(process.env.WEIGHT_GAIN_ALERT_KG);
+  return Number.isFinite(n) && n > 0 ? n : 2;
+})();
+export async function checkWeightTrend(db: Db, patientId: string, active: Alert[], recentlyResolved: Alert[], now: Date) {
+  const rows = await db.reading.findMany({ where: { patientId, type: "WEIGHT", takenAt: { gte: new Date(now.getTime() - 72 * 3600_000), lte: now } }, orderBy: { takenAt: "asc" } });
+  if (rows.length < 2) return null;
+  const last = rows[rows.length - 1];
+  const base = rows.slice(0, -1).reduce((a, b) => (b.value < a.value ? b : a));
+  const gain = Math.round((last.value - base.value) * 10) / 10;
+  if (gain < WEIGHT_GAIN_KG) return null;
+  const breathless = await db.symptom.findFirst({
+    where: { patientId, createdAt: { gte: new Date(now.getTime() - 24 * 3600_000) }, OR: [{ text: { contains: "breath" } }, { text: { contains: "نفس" } }, { redFlags: { contains: "SEVERE_BREATHLESS" } }] },
+    orderBy: { createdAt: "desc" },
+  });
+  const hours = Math.max(1, Math.round((last.takenAt.getTime() - base.takenAt.getTime()) / 3600_000));
+  const span = hours >= 36 ? `${Math.round(hours / 24)} days` : `${hours} h`;
+  return raiseAlert(
+    db,
+    patientId,
+    {
+      kind: "TREND",
+      vital: "WEIGHT",
+      severity: "WARNING",
+      title: `Weight up ${gain} kg in ${span}${breathless ? " with breathlessness reported" : ""}`,
+      message: `Weight ${base.value} kg → ${last.value} kg (${span}).${breathless ? ` Breathlessness reported: "${breathless.text}".` : ""} Possible fluid retention — demo trend rule (≥ ${WEIGHT_GAIN_KG} kg in 72 h), requires clinician review.`,
+    },
+    active,
+    recentlyResolved,
+    now,
+  );
+}

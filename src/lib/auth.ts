@@ -117,3 +117,12 @@ export async function audit(
     },
   });
 }
+
+/**
+ * Demo-only controls (simulator, data reset, synthetic wearable syncs, transfer demo clock) must
+ * never run against real patient data. Set DEMO_MODE="false" in any environment with real data.
+ */
+export const DEMO_MODE = process.env.DEMO_MODE?.trim().toLowerCase() !== "false";
+export function requireDemoMode(what: string) {
+  if (!DEMO_MODE) throw new HttpError(403, `${what} is disabled because DEMO_MODE is off (this environment may hold real data)`);
+}

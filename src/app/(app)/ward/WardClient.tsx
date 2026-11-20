@@ -1,6 +1,6 @@
 "use client";
 import clsx from "clsx";
-import { ArrowRight, BedDouble, BellRing, CalendarX, CircleAlert, Clock, HeartPulse, PenLine, PlugZap, Radio, Stethoscope, Syringe, Unplug, UsersRound } from "lucide-react";
+import { ArrowRight, BedDouble, BellRing, CalendarX, CircleAlert, Clock, HeartPulse, PenLine, PlugZap, Radio, Stethoscope, Syringe, Unplug, UsersRound, Watch, Ambulance } from "lucide-react";
 import Link from "next/link";
 import { useMemo, useState } from "react";
 import { AlertList, type AlertDto } from "@/components/AlertList";
@@ -29,6 +29,8 @@ type PatientCard = {
   checkInOverdue: boolean;
   latest: LatestMap;
   connectivity: "CONNECTED" | "PARTIAL" | "DISCONNECTED" | "MANUAL";
+  wearableLinks?: { name: string; lastSyncAt: string | null }[];
+  transfer?: { status: string; statusLabel: string; open: boolean; priority: string; destination: string; directAdmission: boolean; unitStatus: string; etaAt: string | null; etaKind: string | null; incidentRef: string | null } | null;
   state: MonitoringState;
   stateReason: string;
   openAlerts: number;
@@ -101,6 +103,16 @@ function PatientCardView({ p, now }: { p: PatientCard; now: string }) {
       <div className="mt-2.5 px-4">
         <StatePill state={p.state} />
         <p className="mt-1.5 text-xs leading-snug text-muted">{p.topAlert && p.state !== "STABLE" ? p.topAlert : p.stateReason}</p>
+        {p.transfer && (
+          <p className={clsx("mt-2 flex items-start gap-1.5 rounded-lg px-2 py-1.5 text-[11px] font-medium leading-snug", p.transfer.open ? "bg-crit-soft text-crit" : "bg-neutral-soft text-muted")}>
+            <Ambulance className="mt-px size-3.5 shrink-0" aria-hidden />
+            <span>
+              {p.transfer.statusLabel} → {p.transfer.destination}
+              {p.transfer.open && p.transfer.etaAt ? ` · ETA ${clock(p.transfer.etaAt)}` : ""}
+              {p.transfer.unitStatus === "ACCEPTED" && p.transfer.directAdmission ? " · direct admission" : p.transfer.unitStatus === "DECLINED" ? " · unit declined → ED" : ""}
+            </span>
+          </p>
+        )}
       </div>
 
       <div className={clsx("mx-4 mt-3 rounded-xl bg-surface-2 p-3", stale && "opacity-70")}>
@@ -148,6 +160,14 @@ function PatientCardView({ p, now }: { p: PatientCard; now: string }) {
             <Radio className="size-3" aria-hidden /> Last reading {timeAgo(p.lastReadingAt, now)}
           </span>
         </p>
+        {p.wearableLinks?.map((w) => (
+          <p key={w.name} className="flex items-center justify-between gap-2">
+            <span className="inline-flex min-w-0 items-center gap-1 truncate">
+              <Watch className="size-3.5 shrink-0 text-primary" aria-hidden /> {w.name}
+            </span>
+            <span className="tnum shrink-0">{w.lastSyncAt ? `synced ${timeAgo(w.lastSyncAt, now)}` : "awaiting first sync"}</span>
+          </p>
+        ))}
         <p className="flex items-center justify-between gap-2">
           <span className="inline-flex min-w-0 items-center gap-1 truncate">
             <Stethoscope className="size-3 shrink-0" aria-hidden /> {p.doctor?.name ?? "Unassigned"}
@@ -235,6 +255,18 @@ export function WardClient() {
           The simulator is paused, so no new readings are arriving. Readings are frozen at {clock(data.sim.pausedAt, true)}. Press <b className="font-semibold text-ink">Start simulation</b> to stream live synthetic vitals.
         </p>
       )}
+
+      {data.patients.filter((p) => p.transfer?.open).map((p) => (
+        <Link key={p.id} href={`/patients/${p.id}`} className="flex flex-wrap items-center gap-3 rounded-2xl border-2 border-crit bg-crit-soft px-4 py-3 hover:brightness-[0.98]">
+          <Ambulance className="size-5 shrink-0 text-crit" aria-hidden />
+          <span className="min-w-0 flex-1 text-sm text-ink">
+            <b className="font-semibold">{p.name}</b> — {p.transfer!.statusLabel.toLowerCase()} ({p.transfer!.priority === "EMERGENCY" ? "emergency" : "urgent"}) → {p.transfer!.destination}
+            {p.transfer!.etaAt ? `, ETA ${clock(p.transfer!.etaAt)}` : ""}
+            {p.transfer!.incidentRef ? ` · ${p.transfer!.incidentRef}` : ""}
+          </span>
+          <span className="text-xs font-semibold text-crit">Open tracker →</span>
+        </Link>
+      ))}
 
       <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
         <Kpi icon={<UsersRound className="size-5" />} tone="bg-primary-soft text-primary" value={`${monitored}/${data.patients.length}`} label="Patients with current data" />

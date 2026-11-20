@@ -1,6 +1,6 @@
 "use client";
 import clsx from "clsx";
-import { ArrowUpRight, BellRing, CalendarX, Check, CheckCheck, HeartPulse, MessageSquareWarning, TrendingDown, Unplug } from "lucide-react";
+import { ArrowUpRight, BellRing, CalendarX, Check, CheckCheck, HeartPulse, MessageSquareWarning, TrendingDown, Unplug, Watch, Siren, Ambulance } from "lucide-react";
 import Link from "next/link";
 import { useState } from "react";
 import { api, clock, timeAgo, useAction } from "@/lib/client";
@@ -34,6 +34,10 @@ const KIND_ICON: Record<string, typeof BellRing> = {
   CHECKIN_OVERDUE: CalendarX,
   RHYTHM_FLAG: HeartPulse,
   SYMPTOM: MessageSquareWarning,
+  SYNC_OVERDUE: Watch,
+  URGENT_HELP: Siren,
+  RED_FLAG: Siren,
+  TRANSFER: Ambulance,
 };
 const KIND_LABEL: Record<string, string> = {
   THRESHOLD: "Limit rule",
@@ -42,6 +46,10 @@ const KIND_LABEL: Record<string, string> = {
   CHECKIN_OVERDUE: "Missed check-in",
   RHYTHM_FLAG: "Device flag",
   SYMPTOM: "Symptom",
+  SYNC_OVERDUE: "Wearable sync",
+  URGENT_HELP: "Urgent help",
+  RED_FLAG: "Red-flag symptom",
+  TRANSFER: "Transfer",
 };
 const QUICK_NOTES = ["Contacted patient — reviewed and settled.", "Repeat reading within limits.", "Reviewed by doctor; care plan updated.", "Device issue fixed with patient."];
 

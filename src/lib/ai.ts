@@ -9,7 +9,8 @@ import { prisma } from "./db";
 import { loadLimits, classify, ruleValues } from "./alerts";
 import { computeStatus } from "./status";
 import { getSim } from "./simulator";
-import { STATE_META, VITALS, formatVital, type LatestMap, type SummaryDoc, type VitalType } from "./types";
+import { SOURCE_LABEL, STATE_META, VITALS, formatVital, type LatestMap, type SummaryDoc, type VitalType } from "./types";
+import { SYNC_STALE_MS } from "./wearables";
 
 export const AI_DISCLAIMER =
   "AI-assisted summary of recorded synthetic data, for clinician review only. It does not diagnose, prescribe, assess eligibility for hospital-at-home care or make emergency decisions.";
@@ -80,7 +81,7 @@ export async function gatherFacts(patientId: string, now = new Date()): Promise<
     const l = latest[type];
     if (!l) continue;
     const at = new Date(l.t);
-    vitals.push(`${VITALS[type].label}: ${formatVital(type, l.v, l.v2)} ${VITALS[type].unit} (${ago(at, now)}, ${l.src === "SIMULATED_DEVICE" ? "simulated device" : l.src.replace("_", "-").toLowerCase()})`);
+    vitals.push(`${VITALS[type].label}: ${formatVital(type, l.v, l.v2)} ${VITALS[type].unit} (${ago(at, now)}, ${l.src === "SIMULATED_DEVICE" ? "simulated device" : (SOURCE_LABEL[l.src] ?? l.src).toLowerCase()}${l.src.startsWith("WEARABLE_") ? ", consumer device — not clinically validated" : ""})`);
     for (const rv of ruleValues({ type, value: l.v, value2: l.v2 })) {
       const b = classify(rv.value, lim[rv.vital]);
       if (b) outside.push(`${VITALS[type].label} ${formatVital(type, l.v, l.v2)} ${VITALS[type].unit} is ${b.direction === "low" ? "below" : "above"} the configured ${b.severity === "CRITICAL" ? "critical" : "review"} limit (${b.limit})`);
@@ -99,6 +100,10 @@ export async function gatherFacts(patientId: string, now = new Date()): Promise<
   if (p.nextCheckInDueAt && p.nextCheckInDueAt < now) gaps.push(`Scheduled check-in was due at ${hhmm(p.nextCheckInDueAt)} and has not been received. Absence of data is not evidence that the patient is well.`);
   if (st.state === "NO_RECENT_DATA" && !gaps.length) gaps.push(st.reason);
   if (p.awaitingAssessment) gaps.push("Admission assessment by the doctor has not been recorded yet.");
+  for (const d of p.devices.filter((x) => x.adapter === "WEARABLE_SYNC" && x.status === "CONNECTED")) {
+    if (!d.lastSeenAt) gaps.push(`${d.name} is linked but has not synced yet.`);
+    else if (now.getTime() - d.lastSeenAt.getTime() > SYNC_STALE_MS) gaps.push(`${d.name} has not synced since ${hhmm(d.lastSeenAt)} — smartwatch / phone values are not current.`);
+  }
 
   return {
     patient: `${p.name}, ${p.age} (${p.mrn}, synthetic) — ${p.condition}`,
