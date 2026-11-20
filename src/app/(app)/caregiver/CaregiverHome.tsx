@@ -2,7 +2,8 @@
 // Caregiver app: a restricted overview of one patient. The API returns no history,
 // symptoms, clinician notes, alert details or AI summaries for this role.
 import { CalendarClock, ClipboardCheck, ClipboardList, HeartPulse, Lock, MessageSquare, Pill } from "lucide-react";
-import { MedicationList, MessageThread, ReadingForm, TaskList } from "@/components/CareWidgets";
+import { AutoDevicesCard, MedicationList, MessageThread, TaskList } from "@/components/CareWidgets";
+import { PatientTransferCard } from "@/components/TransferWidgets";
 import { Card, CardHeader, PageError, PageLoading } from "@/components/ui";
 import { clock, timeAgo, useLive } from "@/lib/client";
 import { ConsultCard, LatestTiles, SafetyLine, StatusCard } from "../me/PatientHome";
@@ -32,17 +33,18 @@ export function CaregiverHome({ patientId }: { patientId: string }) {
         </p>
       </header>
 
+      {data.transfer && <PatientTransferCard t={data.transfer} now={now} forCaregiver />}
       <StatusCard state={data.state} checkInOverdue={p.checkInOverdue} forCaregiver />
 
       {p.nextCheckInDueAt && (
         <p className="flex items-center gap-2 rounded-xl border border-line bg-surface px-3.5 py-2.5 text-sm text-ink">
           <CalendarClock className={p.checkInOverdue ? "size-4 shrink-0 text-warn" : "size-4 shrink-0 text-primary"} aria-hidden />
-          {p.checkInOverdue ? "Check-in was due at" : "Next check-in is due at"} <span className="font-semibold">{clock(p.nextCheckInDueAt)}</span>
+          {p.checkInOverdue ? "Scheduled measurement was due at" : "Next scheduled measurement at"} <span className="font-semibold">{clock(p.nextCheckInDueAt)}</span>
           <span className="text-muted">({timeAgo(p.nextCheckInDueAt, now)})</span>
         </p>
       )}
 
-      <SafetyLine />
+      <SafetyLine patientId={patientId} emergencyNumber={data.emergencyNumber} onChange={refresh} forCaregiver />
 
       <div className="grid gap-5 lg:grid-cols-2">
         <div className="space-y-5">
@@ -54,9 +56,9 @@ export function CaregiverHome({ patientId }: { patientId: string }) {
           </Card>
 
           <Card>
-            <CardHeader icon={<ClipboardCheck className="size-4" />} title="Record a check-in" subtitle={`Help ${String(p.name).split(" ")[0]} measure, then send the numbers to the care team`} />
+            <CardHeader icon={<ClipboardCheck className="size-4" />} title="Monitoring devices" subtitle={`${String(p.name).split(" ")[0]}'s readings reach the care team automatically`} />
             <div className="px-5 pb-5">
-              <ReadingForm patientId={patientId} onDone={refresh} withComment />
+              <AutoDevicesCard patientId={patientId} devices={data.devices ?? []} manualEntry={!!p.manualEntry} now={now} onDone={refresh} forCaregiver />
             </div>
           </Card>
 

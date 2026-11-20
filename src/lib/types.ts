@@ -84,7 +84,33 @@ export const SOURCE_LABEL: Record<string, string> = {
   PATIENT_REPORTED: "Patient-reported",
   CAREGIVER_REPORTED: "Caregiver-reported",
   CLINICIAN_ENTERED: "Clinician-entered",
+  WEARABLE_SYNC: "Smartwatch / phone sync",
+  WEARABLE_DEMO: "Smartwatch demo sync (synthetic)",
+  DEVICE_HUB: "Connected device (home hub)",
+  DEVICE_HUB_DEMO: "Home hub demo upload (synthetic)",
 };
+/** Sources whose values are synthetic and must carry a SIMULATED badge. */
+export const SYNTHETIC_SOURCES = new Set(["SIMULATED_DEVICE", "WEARABLE_DEMO", "DEVICE_HUB_DEMO"]);
+
+// ---------------------------------------------------------------- wearables (see docs/WEARABLES.md)
+/** Health-store platforms a smartwatch / phone link can sync from. */
+export type WearablePlatform = "APPLE_HEALTH" | "HEALTH_CONNECT" | "OTHER";
+export const WEARABLE_PLATFORMS: Record<WearablePlatform, { label: string; defaultName: string; devices: string; deviceType: "SMARTWATCH" | "PHONE" }> = {
+  APPLE_HEALTH: { label: "Apple Health", defaultName: "Apple Watch / iPhone", devices: "iPhone · Apple Watch · any device that writes to Apple Health", deviceType: "SMARTWATCH" },
+  HEALTH_CONNECT: { label: "Health Connect (Android)", defaultName: "Android phone / watch", devices: "Android phone · Wear OS · Galaxy Watch · Fitbit · Garmin, via Health Connect", deviceType: "SMARTWATCH" },
+  OTHER: { label: "Other app / companion service", defaultName: "Health app link", devices: "Any app that can POST the documented JSON format", deviceType: "PHONE" },
+};
+
+/** Context metrics from consumer wearables. Shown for context only — no alert rules run on them. */
+export type ActivityType = "STEPS" | "SLEEP" | "RESTING_HR" | "HRV";
+export const ACTIVITY: Record<ActivityType, { label: string; unit: string; decimals: number }> = {
+  STEPS: { label: "Steps", unit: "steps", decimals: 0 },
+  SLEEP: { label: "Sleep", unit: "h", decimals: 1 },
+  RESTING_HR: { label: "Resting heart rate", unit: "bpm", decimals: 0 },
+  HRV: { label: "Heart rate variability", unit: "ms", decimals: 0 },
+};
+export const ACTIVITY_ORDER: ActivityType[] = ["STEPS", "SLEEP", "RESTING_HR", "HRV"];
+export type ActivitySummary = Partial<Record<ActivityType, { v: number; t: string; src: string }>>;
 
 export function formatVital(type: VitalType, v: number, v2?: number | null): string {
   const d = VITALS[type].decimals;
@@ -101,3 +127,49 @@ export type SummaryDoc = { headline: string; sections: SummarySection[]; disclai
 /** Streaming data older than this (against the simulation clock) is "no recent data". */
 export const STALE_MS = 45_000;
 export const BASE_TICK_MS = 3_000;
+
+// ---------------------------------------------------------------- emergency transfer (see docs/EMERGENCY-TRANSFER.md)
+export type TransferStatus = "REQUESTED" | "DISPATCHED" | "ON_SCENE" | "TRANSPORTING" | "ARRIVED" | "HANDED_OVER" | "CANCELLED";
+export const TRANSFER_STAGES: TransferStatus[] = ["REQUESTED", "DISPATCHED", "ON_SCENE", "TRANSPORTING", "ARRIVED", "HANDED_OVER"];
+export const TRANSFER_STATUS: Record<TransferStatus, { label: string; patientLabel: string }> = {
+  REQUESTED: { label: "Ambulance requested", patientLabel: "Ambulance requested" },
+  DISPATCHED: { label: "Ambulance dispatched", patientLabel: "Ambulance on the way" },
+  ON_SCENE: { label: "Crew with patient", patientLabel: "Ambulance crew is with you" },
+  TRANSPORTING: { label: "Transporting", patientLabel: "On the way to hospital" },
+  ARRIVED: { label: "Arrived at hospital", patientLabel: "Arrived at hospital" },
+  HANDED_OVER: { label: "Handed over to receiving team", patientLabel: "With the hospital team" },
+  CANCELLED: { label: "Cancelled", patientLabel: "Transfer cancelled" },
+};
+export const TRANSFER_OPEN: TransferStatus[] = ["REQUESTED", "DISPATCHED", "ON_SCENE", "TRANSPORTING", "ARRIVED"];
+
+export type TransferPriority = "EMERGENCY" | "URGENT";
+export const TRANSFER_PRIORITY: Record<TransferPriority, { label: string; hint: string }> = {
+  EMERGENCY: { label: "Emergency (blue lights)", hint: "Immediate threat to life" },
+  URGENT: { label: "Urgent", hint: "Needs hospital care now, stable enough for a non-emergency response" },
+};
+
+export type TransferPathway = "CARDIAC" | "RESPIRATORY" | "SEPSIS" | "SURGICAL" | "METABOLIC" | "GENERAL_MEDICAL" | "EMERGENCY_DEPT";
+/** Receiving pathways. `direct` = the ambulance goes straight to the unit once it accepts (no ED). */
+export const TRANSFER_PATHWAYS: Record<TransferPathway, { label: string; unit: string; direct: boolean }> = {
+  CARDIAC: { label: "Cardiac", unit: "Coronary Care Unit (CCU)", direct: true },
+  RESPIRATORY: { label: "Respiratory", unit: "Respiratory High Dependency Unit", direct: true },
+  SEPSIS: { label: "Suspected sepsis", unit: "Acute Medical Unit — sepsis bay", direct: true },
+  SURGICAL: { label: "Surgical", unit: "Surgical Assessment Unit", direct: true },
+  METABOLIC: { label: "Metabolic / diabetes", unit: "Acute Medical Unit", direct: true },
+  GENERAL_MEDICAL: { label: "General medical", unit: "Acute Medical Unit", direct: true },
+  EMERGENCY_DEPT: { label: "Emergency department", unit: "Emergency Department (pre-alerted)", direct: false },
+};
+
+// ---------------------------------------------------------------- red-flag symptoms (deterministic triage, no AI)
+export type RedFlag = "CHEST_PAIN" | "SEVERE_BREATHLESS" | "BLUE_LIPS" | "CONFUSION" | "FAINT" | "STROKE" | "BLEEDING" | "SEIZURE";
+export const RED_FLAGS: Record<RedFlag, { label: string; pathway: TransferPathway; advice: string }> = {
+  CHEST_PAIN: { label: "New or severe chest pain / pressure", pathway: "CARDIAC", advice: "Stop what you are doing, sit down and rest. Do not drive yourself." },
+  SEVERE_BREATHLESS: { label: "Severe breathlessness — can't finish a sentence", pathway: "RESPIRATORY", advice: "Sit upright. If you use home oxygen, keep it on as prescribed." },
+  BLUE_LIPS: { label: "Blue or grey lips / face", pathway: "RESPIRATORY", advice: "Sit upright and keep still." },
+  CONFUSION: { label: "New confusion, very drowsy or hard to wake", pathway: "EMERGENCY_DEPT", advice: "Do not leave the person alone. Do not give food or drink." },
+  FAINT: { label: "Fainted or collapsed", pathway: "EMERGENCY_DEPT", advice: "Lie down. Do not stand up quickly." },
+  STROKE: { label: "Face drooping, arm weakness or slurred speech", pathway: "EMERGENCY_DEPT", advice: "Note the time the symptoms started — the hospital will ask." },
+  BLEEDING: { label: "Heavy bleeding, or vomiting / coughing blood", pathway: "EMERGENCY_DEPT", advice: "Press firmly on any visible bleeding." },
+  SEIZURE: { label: "Seizure / fit", pathway: "EMERGENCY_DEPT", advice: "Move objects away, do not hold the person down, note how long it lasts." },
+};
+export const RED_FLAG_ORDER: RedFlag[] = ["CHEST_PAIN", "SEVERE_BREATHLESS", "BLUE_LIPS", "CONFUSION", "FAINT", "STROKE", "BLEEDING", "SEIZURE"];

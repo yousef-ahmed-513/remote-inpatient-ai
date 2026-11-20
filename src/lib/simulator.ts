@@ -8,6 +8,8 @@ import type { Alert, Device, Patient } from "@prisma/client";
 import { prisma, withLock } from "./db";
 import { evaluateReadings, loadAlertContext, loadLimits, raiseAlert, spo2TrendDraft } from "./alerts";
 import { BASE_TICK_MS, type LatestMap, type VitalType } from "./types";
+import { checkWearableSync } from "./wearables";
+import { advanceTransfers } from "./transfers";
 
 export type Vals = { hr: number; spo2: number; rr: number; sys: number; dia: number; temp: number; glucose: number };
 type Gen = { vals: Vals; phase: string; step: number; irregular: boolean; events: ("SYMPTOM" | "RHYTHM_START")[] };
@@ -261,16 +263,20 @@ async function housekeeping(now: Date) {
         await raiseAlert(
           prisma,
           p.id,
-          { kind: "CHECKIN_OVERDUE", vital: null, severity: "WARNING", title: "Scheduled check-in overdue", message: `No patient-submitted observations were received by the expected time (${due.toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" })}). Absence of data does not indicate the patient is well.` },
+          { kind: "CHECKIN_OVERDUE", vital: null, severity: "WARNING", title: "Scheduled measurement not received", message: `No reading arrived from the patient's devices by the scheduled time (${due.toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" })}). The device may not have been used, or the home hub may be offline. Absence of data does not indicate the patient is well.` },
           active,
           [],
           now,
         );
       }
     } else {
-      for (const a of overdueAlerts) if (a.status !== "RESOLVED") await systemResolve(a, "Check-in received");
+      for (const a of overdueAlerts) if (a.status !== "RESOLVED") await systemResolve(a, "Scheduled measurement received");
     }
   }
+  // Linked smartwatches / phones that have gone quiet (real time, not simulation time).
+  await checkWearableSync(now, active, systemResolve);
+  // Simulated ambulance / receiving-unit progress for emergency transfers.
+  await advanceTransfers(now);
 }
 
 /** Call from every data-reading endpoint. Safe under concurrent polling. */
@@ -278,7 +284,8 @@ export function advanceSimulation() {
   return withLock(async () => {
     let sim = await getSim();
     const now = new Date();
-    if (sim.running) {
+    // Synthetic readings are never generated when DEMO_MODE is off (environment may hold real data).
+    if (sim.running && process.env.DEMO_MODE?.trim().toLowerCase() !== "false") {
       const interval = BASE_TICK_MS / Math.max(1, sim.speed);
       const last = sim.lastTickAt?.getTime() ?? 0;
       const due = Math.floor((now.getTime() - last) / interval);

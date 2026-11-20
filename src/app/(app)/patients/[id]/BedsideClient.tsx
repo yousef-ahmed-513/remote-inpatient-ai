@@ -1,13 +1,14 @@
 "use client";
 import clsx from "clsx";
 import {
-  Activity, ArrowLeft, BedDouble, BellRing, CalendarClock, CircleAlert, ClipboardCheck, ClipboardList, FileText, HeartPulse, History, ListChecks, MessageSquare,
-  MessageSquareWarning, NotebookPen, Pill, Radio, Save, SlidersHorizontal, Sparkles, Stethoscope, Syringe, Video,
+  Activity, Ambulance, ArrowLeft, BedDouble, BellRing, CalendarClock, CircleAlert, ClipboardCheck, ClipboardList, FileText, HeartPulse, History, ListChecks, MessageSquare,
+  MessageSquareWarning, NotebookPen, Pill, Radio, Save, SlidersHorizontal, Sparkles, Stethoscope, Router, Syringe, Video, Watch,
 } from "lucide-react";
 import Link from "next/link";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { AlertList, type AlertDto } from "@/components/AlertList";
-import { ConsultRoom, DevicePanel, MedicationList, MessageThread, TaskList, type DeviceDto, type MedDto, type MessageDto, type TaskDto } from "@/components/CareWidgets";
+import { TransferPanel, TransferRequestDialog, type TransferDto } from "@/components/TransferWidgets";
+import { ActivityStrip, ConsultRoom, DevicePanel, HubPanel, MedicationList, MessageThread, TaskList, WearablePanel, type DeviceDto, type MedDto, type MessageDto, type TaskDto } from "@/components/CareWidgets";
 import { EcgLive, EcgStrip } from "@/components/EcgMonitor";
 import type { SimDto } from "@/components/SimControls";
 import { SummaryView, type SummaryDto } from "@/components/SummaryView";
@@ -16,7 +17,7 @@ import { VitalChart, type Point } from "@/components/VitalChart";
 import { api, clock, dateTime, initials, timeAgo, useAction, useLive } from "@/lib/client";
 import { worstBreach } from "@/lib/rules";
 import {
-  ROLE_LABEL, SOURCE_LABEL, THRESHOLD_VITALS, VITALS, VITAL_ORDER, formatVital, mgdlToMmol,
+  RED_FLAGS, ROLE_LABEL, SOURCE_LABEL, SYNTHETIC_SOURCES, type RedFlag, THRESHOLD_VITALS, type ActivitySummary, VITALS, VITAL_ORDER, formatVital, mgdlToMmol,
   type LatestMap, type Limits, type MonitoringState, type Role, type ThresholdVital, type VitalType,
 } from "@/lib/types";
 
@@ -28,12 +29,14 @@ type View = {
   now: string;
   patient: {
     id: string; mrn: string; name: string; age: number; sex: string; condition: string; pathway: string; room: string; wardName: string; admittedAt: string;
-    doctor: Who; nurse: Who; lastContactAt: string | null; lastReadingAt: string | null; nextCheckInDueAt: string | null; checkInOverdue: boolean; awaitingAssessment: boolean; carePlan: string[];
+    doctor: Who; nurse: Who; lastContactAt: string | null; lastReadingAt: string | null; nextCheckInDueAt: string | null; checkInOverdue: boolean; awaitingAssessment: boolean; carePlan: string[]; manualEntry?: boolean;
   };
   state: MonitoringState;
   stateReason: string;
   connectivity: string;
   latest: LatestMap;
+  activity?: ActivitySummary;
+  transfer?: TransferDto | null;
   devices: DeviceDto[];
   tasks: TaskDto[];
   medications: MedDto[];
@@ -43,7 +46,7 @@ type View = {
   limits: Record<ThresholdVital, Limits>;
   defaultLimits: Record<ThresholdVital, Limits>;
   limitOverrides: { vital: ThresholdVital; updatedBy: string | null; updatedAt: string }[];
-  symptoms: { id: string; text: string; severity: string; reportedBy: string; createdAt: string; reviewedAt: string | null; reviewedBy: string | null }[];
+  symptoms: { id: string; text: string; severity: string; redFlags?: string[]; reportedBy: string; createdAt: string; reviewedAt: string | null; reviewedBy: string | null }[];
   alerts: AlertDto[];
   notes: { id: string; authorName: string; authorRole: string; kind: string; body: string; createdAt: string }[];
   summaries: SummaryDto[];
@@ -90,7 +93,10 @@ function VitalTiles({ v }: { v: View }) {
             <p className="tnum mt-2 flex flex-wrap items-center gap-x-1.5 gap-y-0.5 text-[11px] text-muted" title={dateTime(l.t)}>
               {stale ? "Last received" : "Measured"} {timeAgo(l.t, v.now)}
             </p>
-            <p className="mt-0.5 flex items-center gap-1 text-[10px] text-muted">{l.src === "SIMULATED_DEVICE" ? <SimBadge /> : (SOURCE_LABEL[l.src] ?? l.src)}</p>
+            <p className="mt-0.5 flex flex-wrap items-center gap-1 text-[10px] text-muted">
+              {SYNTHETIC_SOURCES.has(l.src) && <SimBadge />}
+              {l.src !== "SIMULATED_DEVICE" && (SOURCE_LABEL[l.src] ?? l.src)}
+            </p>
           </Card>
         );
       })}
@@ -211,6 +217,11 @@ function SymptomsCard({ v, refresh }: { v: View; refresh: () => void }) {
                 <p className="text-sm leading-relaxed text-ink">“{s.text}”</p>
                 <p className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px] text-muted">
                   <Badge tone={s.severity === "SEVERE" ? "crit" : s.severity === "MODERATE" ? "warn" : "muted"}>{s.severity.toLowerCase()}</Badge>
+                  {s.redFlags?.map((f) => (
+                    <Badge key={f} tone="crit">
+                      Red flag: {RED_FLAGS[f as RedFlag]?.label ?? f}
+                    </Badge>
+                  ))}
                   {s.reportedBy} · {timeAgo(s.createdAt, v.now)}
                   {s.reviewedAt ? (
                     <span className="text-ok">· reviewed by {s.reviewedBy} at {clock(s.reviewedAt)}</span>
@@ -413,6 +424,14 @@ export function BedsideClient({ patientId }: { patientId: string }) {
   const [tab, setTab] = useState<TabId>("overview");
   const [noteOpen, setNoteOpen] = useState<string | null>(null);
   const [room, setRoom] = useState(false);
+  const [transferOpen, setTransferOpen] = useState(false);
+  // Voice command "ambulance for <patient>" lands here with ?transfer=1 → open the form (never auto-submits).
+  useEffect(() => {
+    if (typeof window !== "undefined" && new URLSearchParams(window.location.search).get("transfer") === "1") {
+      setTransferOpen(true);
+      window.history.replaceState(null, "", window.location.pathname);
+    }
+  }, []);
   const consult = useAction();
 
   if (loading && !v) return <PageLoading />;
@@ -484,6 +503,11 @@ export function BedsideClient({ patientId }: { patientId: string }) {
                   <ClipboardCheck className="size-3.5" /> Record check-in
                 </Button>
               )}
+              {!v.transfer?.open && (
+                <Button size="sm" variant="danger" onClick={() => setTransferOpen(true)}>
+                  <Ambulance className="size-3.5" /> Emergency transfer
+                </Button>
+              )}
               <Button size="sm" onClick={() => setNoteOpen("NOTE")}>
                 <NotebookPen className="size-3.5" /> Add note
               </Button>
@@ -526,7 +550,11 @@ export function BedsideClient({ patientId }: { patientId: string }) {
         </div>
       )}
 
+      {v.transfer && <TransferPanel t={v.transfer} patientId={p.id} now={v.now} onChange={refresh} />}
+      <TransferRequestDialog patientId={p.id} patientName={p.name} open={transferOpen} onClose={() => setTransferOpen(false)} onDone={refresh} />
+
       <VitalTiles v={v} />
+      {v.activity && Object.keys(v.activity).length > 0 && <ActivityStrip activity={v.activity} now={v.now} />}
 
       <Tabs<TabId>
         value={tab}
@@ -683,6 +711,18 @@ export function BedsideClient({ patientId }: { patientId: string }) {
             <CardHeader icon={<Radio className="size-4" />} title="Monitoring devices" subtitle="Device adapters — simulated data is always labelled" />
             <div className="px-5 pb-5">
               <DevicePanel patientId={p.id} devices={v.devices} canManage now={v.now} onChange={refresh} />
+            </div>
+          </Card>
+          <Card>
+            <CardHeader icon={<Router className="size-4" />} title="Home hub — automatic uploads" subtitle="Medical devices upload by themselves; no patient data entry" />
+            <div className="px-5 pb-5">
+              <HubPanel patientId={p.id} devices={v.devices} manualEntry={!!p.manualEntry} now={v.now} onChange={refresh} />
+            </div>
+          </Card>
+          <Card>
+            <CardHeader icon={<Watch className="size-4" />} title="Smartwatch & phone" subtitle="Patient-owned consumer devices synced from Apple Health / Health Connect" />
+            <div className="px-5 pb-5">
+              <WearablePanel patientId={p.id} devices={v.devices} canManage now={v.now} onChange={refresh} />
             </div>
           </Card>
           <LimitsCard v={v} refresh={refresh} />

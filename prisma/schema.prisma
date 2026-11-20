@@ -32,6 +32,7 @@ model Patient {
   id                 String    @id @default(cuid())
   mrn                String    @unique // synthetic ID, e.g. SYN-0001
   name               String
+  nameAr             String    @default("") // Arabic spelling (display + voice-command matching)
   age                Int
   sex                String
   condition          String
@@ -54,6 +55,11 @@ model Patient {
   // denormalised latest value per vital: { HR: { v, v2?, t, src } , ... }
   latestJson         String    @default("{}")
   lastReadingAt      DateTime?
+  // home location for an emergency transfer (synthetic in the demo)
+  address            String    @default("")
+  // Readings come from devices automatically. Patient/caregiver typing is a clinician-enabled fallback only.
+  manualEntry        Boolean   @default(false)
+  accessNotes        String    @default("")
 
   devices     Device[]
   readings    Reading[]
@@ -67,6 +73,42 @@ model Patient {
   ecgStrips   EcgStrip[]
   consults    Consult[]
   thresholds  Threshold[]
+  transfers   Transfer[]
+}
+
+// Emergency transfer: ambulance dispatch + direct admission to a receiving hospital unit
+// (bypassing the emergency department when the unit accepts). See docs/EMERGENCY-TRANSFER.md.
+model Transfer {
+  id               String    @id @default(cuid())
+  patientId        String
+  patient          Patient   @relation(fields: [patientId], references: [id], onDelete: Cascade)
+  status           String // REQUESTED | DISPATCHED | ON_SCENE | TRANSPORTING | ARRIVED | HANDED_OVER | CANCELLED
+  priority         String // EMERGENCY | URGENT
+  pathway          String // CARDIAC | RESPIRATORY | SEPSIS | SURGICAL | METABOLIC | GENERAL_MEDICAL | EMERGENCY_DEPT
+  suggestedPathway String
+  reason           String
+  hospital         String
+  destination      String // receiving unit (or the emergency department after a decline)
+  unitStatus       String    @default("PENDING") // PENDING | ACCEPTED | DECLINED
+  directAdmission  Boolean   @default(true)
+  bed              String?
+  incidentRef      String?
+  vehicle          String?
+  pickupAddress    String
+  accessNotes      String    @default("")
+  handoverJson     String // ISBAR snapshot sent to crew + receiving unit
+  checklistJson    String // receiving-unit preparation items
+  scheduleJson     String // planned times of the simulated stages
+  timelineJson     String    @default("[]")
+  requestedById    String
+  requestedByName  String
+  cancelReason     String?
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
+  closedAt         DateTime?
+
+  @@index([patientId, createdAt])
+  @@index([status])
 }
 
 model Device {
@@ -74,12 +116,23 @@ model Device {
   patientId  String
   patient    Patient   @relation(fields: [patientId], references: [id], onDelete: Cascade)
   name       String
-  deviceType String // WEARABLE_PATCH | PULSE_OXIMETER | BP_MONITOR | THERMOMETER | GLUCOMETER | SCALE
-  adapter    String    @default("SIMULATED") // SIMULATED | BLUETOOTH | EXTERNAL_API | MANUAL
-  status     String    @default("CONNECTED") // CONNECTED | DISCONNECTED
+  deviceType String // WEARABLE_PATCH | PULSE_OXIMETER | BP_MONITOR | THERMOMETER | GLUCOMETER | SCALE | SMARTWATCH | PHONE | HOME_HUB
+  adapter    String    @default("SIMULATED") // SIMULATED | BLUETOOTH | EXTERNAL_API | MANUAL | WEARABLE_SYNC | GATEWAY
+  status     String    @default("CONNECTED") // CONNECTED | DISCONNECTED | REVOKED (WEARABLE_SYNC links only)
   battery    Int       @default(90)
-  streaming  Boolean   @default(true) // false = spot-check device (manual check-ins)
+  streaming  Boolean   @default(true) // false = spot-check device (manual check-ins) or batch-syncing wearable
   lastSeenAt DateTime?
+  // --- WEARABLE_SYNC links (smartwatch / phone health-store sync). See docs/WEARABLES.md ---
+  platform   String? // APPLE_HEALTH | HEALTH_CONNECT | OTHER
+  tokenHash  String? // SHA-256 of the per-device ingest token; the token itself is never stored
+  tokenHint  String? // last 4 characters, so people can tell links apart
+  syncCount  Int       @default(0) // samples accepted so far
+  // --- home hub (GATEWAY) provisioning. See docs/DEVICE-GATEWAY.md ---
+  serial     String? // manufacturer serial; how a hub upload identifies the device
+  hubId      String? // the HOME_HUB device row this medical device is paired with
+  createdAt  DateTime  @default(now())
+
+  @@index([tokenHash])
 }
 
 model Reading {
@@ -87,15 +140,16 @@ model Reading {
   patientId String
   patient   Patient  @relation(fields: [patientId], references: [id], onDelete: Cascade)
   deviceId  String?
-  type      String // HR | SPO2 | BP | TEMP | RR | GLUCOSE | WEIGHT
+  type      String // HR | SPO2 | BP | TEMP | RR | GLUCOSE | WEIGHT · wearable activity: STEPS | SLEEP | RESTING_HR | HRV
   value     Float
   value2    Float? // diastolic for BP
   unit      String
-  source    String // SIMULATED_DEVICE | PATIENT_REPORTED | CAREGIVER_REPORTED | CLINICIAN_ENTERED
+  source    String // SIMULATED_DEVICE | PATIENT_REPORTED | CAREGIVER_REPORTED | CLINICIAN_ENTERED | WEARABLE_SYNC | WEARABLE_DEMO
   quality   String   @default("GOOD")
   takenAt   DateTime
 
   @@index([patientId, type, takenAt])
+  @@index([deviceId, takenAt])
 }
 
 model EcgStrip {
@@ -131,7 +185,7 @@ model Alert {
   id               String    @id @default(cuid())
   patientId        String
   patient          Patient   @relation(fields: [patientId], references: [id], onDelete: Cascade)
-  kind             String // THRESHOLD | TREND | CONNECTIVITY | CHECKIN_OVERDUE | RHYTHM_FLAG | SYMPTOM
+  kind             String // THRESHOLD | TREND | CONNECTIVITY | CHECKIN_OVERDUE | RHYTHM_FLAG | SYMPTOM | SYNC_OVERDUE | URGENT_HELP | TRANSFER | RED_FLAG
   vital            String?
   severity         String // WARNING | CRITICAL
   title            String
@@ -156,6 +210,7 @@ model Symptom {
   patient      Patient  @relation(fields: [patientId], references: [id], onDelete: Cascade)
   text         String
   severity     String   @default("MODERATE") // MILD | MODERATE | SEVERE
+  redFlags     String   @default("") // comma-separated RedFlag codes (ticked or detected)
   reportedById String? // null = simulator
   reportedBy   String // display label
   reviewedAt   DateTime?

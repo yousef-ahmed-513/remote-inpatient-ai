@@ -7,6 +7,7 @@ import { useEffect, useRef, useState, type ReactNode } from "react";
 import { api, initials, useLive } from "@/lib/client";
 import { ROLE_LABEL, type Role } from "@/lib/types";
 import { Logo, LogoMark } from "./Logo";
+import { VoiceAssistant } from "./VoiceAssistant";
 
 type User = { id: string; name: string; role: Role; title: string };
 type Toast = { id: string; title: string; patient: string; severity: string; patientId: string };
@@ -68,6 +69,7 @@ export function AppShell({ user, children }: { user: User; children: ReactNode }
       fresh.forEach((a) => seen.current!.add(a.id));
       const add = fresh.map((a) => ({ id: a.id, title: a.title, patient: a.patient?.name ?? "Patient", severity: a.severity, patientId: a.patientId }));
       setToasts((t) => [...add, ...t].slice(0, 4));
+      window.dispatchEvent(new CustomEvent("ria:new-alerts", { detail: add })); // voice announcements
       add.forEach((x) => setTimeout(() => setToasts((t) => t.filter((y) => y.id !== x.id)), 9000));
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -138,10 +140,11 @@ export function AppShell({ user, children }: { user: User; children: ReactNode }
         </div>
       </header>
 
-      <main className="mx-auto max-w-[1500px] px-4 py-5 lg:px-6 lg:py-6">{children}</main>
+      <main className="mx-auto max-w-[1500px] px-4 py-5 pb-24 lg:px-6 lg:py-6 lg:pb-24">{children}</main>
+      <VoiceAssistant role={user.role} />
 
       {/* Notifications */}
-      <div className="pointer-events-none fixed bottom-4 right-4 z-40 flex w-[min(92vw,360px)] flex-col gap-2" aria-live="assertive">
+      <div className="pointer-events-none fixed bottom-20 right-4 z-40 flex w-[min(92vw,360px)] flex-col gap-2" aria-live="assertive">
         {toasts.map((t) => (
           <div key={t.id} className={clsx("fade-up pointer-events-auto flex items-start gap-3 rounded-xl border border-line border-l-4 bg-surface p-3 shadow-2xl", t.severity === "CRITICAL" ? "border-l-crit" : "border-l-warn")}>
             <Bell className={clsx("mt-0.5 size-4 shrink-0", t.severity === "CRITICAL" ? "text-crit" : "text-warn")} aria-hidden />

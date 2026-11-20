@@ -27,6 +27,10 @@ export type Action =
   | "consult:manage"
   | "device:manage"
   | "med:log"
+  | "transfer:request" // ask the ambulance service for an emergency transfer
+  | "transfer:manage" // cancel, prep checklist, demo clock
+  | "urgent:help" // patient / caregiver "I need urgent help" button
+  | "kit:manage" // provision the home hub, pair devices, allow manual-entry fallback
   | "sim:control"
   | "admin:view"
   | "admin:manage";
@@ -59,6 +63,10 @@ export const MATRIX: Record<Action, Role[]> = {
   "consult:manage": CLINICIANS,
   "device:manage": ["PATIENT", "NURSE", "DOCTOR"],
   "med:log": ["PATIENT", "CAREGIVER", "NURSE"],
+  "transfer:request": CLINICIANS,
+  "transfer:manage": CLINICIANS,
+  "urgent:help": ["PATIENT", "CAREGIVER"],
+  "kit:manage": CLINICIANS,
   "sim:control": ["ADMIN", "DOCTOR", "NURSE"],
   "admin:view": ["ADMIN"],
   "admin:manage": ["ADMIN"],

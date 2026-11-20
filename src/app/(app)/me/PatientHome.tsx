@@ -17,14 +17,16 @@ import {
   Stethoscope,
   Unplug,
   Video,
+  Smartphone,
   Watch,
 } from "lucide-react";
 import { useRef, useState, type ReactNode } from "react";
-import { ConsultRoom, DevicePanel, MedicationList, MessageThread, ReadingForm, SymptomForm, TaskList } from "@/components/CareWidgets";
+import { PatientTransferCard, UrgentHelpButton } from "@/components/TransferWidgets";
+import { ActivityStrip, AutoDevicesCard, ConsultRoom, DevicePanel, MedicationList, MessageThread, SymptomForm, TaskList, WearablePanel } from "@/components/CareWidgets";
 import { VitalChart, type Point } from "@/components/VitalChart";
 import { Badge, Button, Card, CardHeader, Empty, ErrorNote, Field, PageError, PageLoading, SimBadge, Textarea, type Tone } from "@/components/ui";
 import { api, clock, dateTime, timeAgo, useAction, useLive } from "@/lib/client";
-import { SOURCE_LABEL, VITALS, VITAL_ORDER, formatVital, mgdlToMmol, type LatestMap, type MonitoringState, type VitalType } from "@/lib/types";
+import { SOURCE_LABEL, SYNTHETIC_SOURCES, VITALS, VITAL_ORDER, formatVital, mgdlToMmol, type LatestMap, type MonitoringState, type VitalType } from "@/lib/types";
 
 // ------------------------------------------------------------------ shared with the caregiver page
 
@@ -82,14 +84,19 @@ export function StatusCard({ state, checkInOverdue, forCaregiver }: { state: Mon
   );
 }
 
-export function SafetyLine() {
+export function SafetyLine({ patientId, emergencyNumber, onChange, forCaregiver = false }: { patientId: string; emergencyNumber: string; onChange?: () => void; forCaregiver?: boolean }) {
   return (
-    <p className="flex items-start gap-2.5 rounded-xl border border-crit/30 bg-crit-soft px-3.5 py-2.5 text-[13px] leading-relaxed text-ink">
-      <Siren className="mt-0.5 size-4 shrink-0 text-crit" aria-hidden />
-      <span>
-        <span className="font-semibold">This service does not replace emergency care.</span> If you feel very unwell or it is an emergency, call your local emergency number.
+    <div className="flex flex-wrap items-center gap-3 rounded-xl border border-crit/30 bg-crit-soft px-3.5 py-2.5 text-[13px] leading-relaxed text-ink">
+      <Siren className="size-4 shrink-0 text-crit" aria-hidden />
+      <span className="min-w-0 flex-1">
+        <span className="font-semibold">This service does not replace emergency care.</span> In an emergency call{" "}
+        <a href={`tel:${emergencyNumber}`} className="font-semibold text-crit underline">
+          {emergencyNumber}
+        </a>
+        . Need the care team right now? Use the urgent help button.
       </span>
-    </p>
+      <UrgentHelpButton patientId={patientId} emergencyNumber={emergencyNumber} onDone={onChange} forCaregiver={forCaregiver} />
+    </div>
   );
 }
 
@@ -106,7 +113,7 @@ export function LatestTiles({ latest, stale, now }: { latest: LatestMap; stale: 
           <div key={t} className={clsx("rounded-xl border border-line p-3", stale ? "bg-neutral-soft" : "bg-surface")}>
             <p className="flex items-center justify-between gap-1 text-xs font-medium text-muted">
               <span>{m.label}</span>
-              {l.src === "SIMULATED_DEVICE" && <SimBadge />}
+              {SYNTHETIC_SOURCES.has(l.src) && <SimBadge />}
             </p>
             <p className={clsx("tnum mt-1 text-2xl font-bold leading-tight", stale ? "text-muted" : "text-ink")}>
               {formatVital(t, l.v, l.v2)} <span className="text-xs font-medium text-muted">{m.unit}</span>
@@ -222,6 +229,8 @@ export function PatientHome({ patientId }: { patientId: string }) {
         </p>
       </header>
 
+      {data.transfer && <PatientTransferCard t={data.transfer} now={now} />}
+
       {/* When the only issue is an overdue check-in, the banner below says it once. */}
       {!(p.checkInOverdue && data.state === "NO_RECENT_DATA") && <StatusCard state={data.state} checkInOverdue={p.checkInOverdue} />}
 
@@ -229,23 +238,23 @@ export function PatientHome({ patientId }: { patientId: string }) {
         <div className="flex flex-wrap items-center gap-3 rounded-2xl border border-warn/40 bg-warn-soft p-4">
           <CalendarClock className="size-5 shrink-0 text-warn" aria-hidden />
           <div className="min-w-0 flex-1">
-            <p className="text-base font-semibold text-warn">Check-in due</p>
+            <p className="text-base font-semibold text-warn">Time for your scheduled measurement</p>
             <p className="text-sm text-ink">
-              Your readings were due at {clock(p.nextCheckInDueAt)} ({timeAgo(p.nextCheckInDueAt, now)}). It only takes a minute.
+              It was due at {clock(p.nextCheckInDueAt)} ({timeAgo(p.nextCheckInDueAt, now)}). Please use your {(data.devices ?? []).filter((d: { streaming: boolean; deviceType: string; adapter: string }) => !d.streaming && d.deviceType !== "HOME_HUB" && d.adapter !== "WEARABLE_SYNC").map((d: { name: string }) => d.name).join(" and ") || "devices"} — the reading is sent automatically.
             </p>
           </div>
-          <Button variant="primary" onClick={() => formRef.current?.scrollIntoView({ behavior: "smooth", block: "start" })}>
-            Send my readings now
+          <Button onClick={() => formRef.current?.scrollIntoView({ behavior: "smooth", block: "start" })}>
+            Check my devices
           </Button>
         </div>
       ) : p.nextCheckInDueAt ? (
         <p className="flex items-center gap-2 rounded-xl border border-line bg-surface px-3.5 py-2.5 text-sm text-ink">
           <CalendarClock className="size-4 shrink-0 text-primary" aria-hidden />
-          Your next check-in is due at <span className="font-semibold">{clock(p.nextCheckInDueAt)}</span> <span className="text-muted">({timeAgo(p.nextCheckInDueAt, now)})</span>
+          Your next scheduled measurement is at <span className="font-semibold">{clock(p.nextCheckInDueAt)}</span> <span className="text-muted">({timeAgo(p.nextCheckInDueAt, now)})</span>
         </p>
       ) : null}
 
-      <SafetyLine />
+      <SafetyLine patientId={patientId} emergencyNumber={data.emergencyNumber} onChange={refresh} />
 
       <div className="grid gap-5 lg:grid-cols-2">
         {/* left column */}
@@ -254,14 +263,20 @@ export function PatientHome({ patientId }: { patientId: string }) {
             <CardHeader icon={<HeartPulse className="size-4" />} title="My latest readings" subtitle={stale ? "Your device is not sending data — these are the last values received, not current ones" : "The most recent value for each measurement"} />
             <div className="px-5 pb-5">
               <LatestTiles latest={data.latest ?? {}} stale={stale} now={now} />
+              {data.activity && Object.keys(data.activity).length > 0 && (
+                <div className="mt-4">
+                  <p className="mb-2 text-xs font-semibold text-muted">From my smartwatch &amp; phone</p>
+                  <ActivityStrip activity={data.activity} now={now} />
+                </div>
+              )}
             </div>
           </Card>
 
           <div ref={formRef} className="scroll-mt-20">
             <Card>
-              <CardHeader icon={<ClipboardCheck className="size-4" />} title="Send my readings" subtitle="Measure, type the numbers in, and send them to your care team" />
+              <CardHeader icon={<ClipboardCheck className="size-4" />} title="My monitoring devices" subtitle="Readings reach your care team automatically" />
               <div className="px-5 pb-5">
-                <ReadingForm patientId={patientId} onDone={refresh} />
+                <AutoDevicesCard patientId={patientId} devices={data.devices ?? []} manualEntry={!!p.manualEntry} now={now} onDone={refresh} />
               </div>
             </Card>
           </div>
@@ -385,6 +400,13 @@ export function PatientHome({ patientId }: { patientId: string }) {
               <p className="mt-3 text-[11px] text-muted">
                 {p.pathway} · admitted {dateTime(p.admittedAt)}
               </p>
+            </div>
+          </Card>
+
+          <Card>
+            <CardHeader icon={<Smartphone className="size-4" />} title="My smartwatch & phone" subtitle="Apple Watch, Android / Wear OS and other health apps" />
+            <div className="px-5 pb-5">
+              <WearablePanel patientId={patientId} devices={data.devices ?? []} canManage now={now} onChange={refresh} forPatient />
             </div>
           </Card>
 
